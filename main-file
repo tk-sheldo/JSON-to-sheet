@@ -1,0 +1,320 @@
+/*===========================================================================================================*
+  Import iNat JSON by Tyler Sheldon @tk-sheldo
+
+  ===========================================================================================================
+  Version:      1.0
+  Project Page: ####
+  Copyright:    (c) 2021 by Tyler Sheldon
+  License:      GNU General Public License, version 3 (GPL-3.0) 
+                http://www.opensource.org/licenses/gpl-3.0.html
+  -----------------------------------------------------------------------------------------------------------
+  A script for importing iNat JSON feeds into Google spreadsheets. 
+  -----------------------------------------------------------------------------------------------------------
+  Changelog:
+
+  1.0    Initial release
+  
+ *==========================================================================================================*/
+
+class Observations {
+
+  /**
+   * Fetches cedar data from iNat API and stores it in this.rawObs
+   */
+  constructor() {
+    const per_page = 20
+
+    var page = 1
+    var observations = []
+
+    do {
+      // this is a note // 
+      var url = 
+        'https://api.inaturalist.org/v1/observations?project_id=western-redcedar-dieback-map&page=' +
+        page + '&' + per_page + '=20&order=desc&order_by=created_at'
+
+      var json_data = UrlFetchApp.fetch(url)
+      var page_observations = JSON.parse(json_data.getContentText())
+
+      observations = observations.concat(page_observations.results)
+
+      page++
+
+    } while ((page * per_page) < page_observations.total_results)
+
+    this.count = page_observations.total_results
+    this.rawObs = observations
+
+    //this.rawObs = this.rawObs.slice(0,5)
+  }
+
+  /**
+   * Simplifies observation objects, storing result in this.simpleObs
+   */
+  parse() {
+
+    Logger.log("Parsing observations")
+
+    this.simpleObs = []
+
+    for (var i in this.rawObs) {
+
+      var ob = this.rawObs[i]
+      var sob = {}
+
+      // missing fields
+      // private_place_guess, private_latitude, private_longitude, place_town_name, place_county_name, place_state_name, place_country_name, place_admin1_name, place_admin2_name
+
+      var fields = ['id', 'observed_on_string', 'observed_on', 
+        'time_observed_at', 'observed_time_zone','created_at',
+        'updated_at', 'quality_grade', 'license_code', 'uri', 'user/id',
+        'user/login', 'photos/0/url', 'description', 'num_identification_agreements',
+        'num_identification_disagreements', 'captive', 'oauth_application_id', 
+        'place_guess', 'geojson/coordinates/1', 'geojson/coordinates/0',
+        'positional_accuracy', 'geoprivacy', 'public_positional_accuracy', 
+        'taxon_geoprivacy', 'coordinates_obscured', 'positioning_method', 'positioning_device']
+
+      // add ofvs fields
+      for (i=0; i<=14; i++) {
+        fields.push('ofvs/' + i + '/name')
+        fields.push('ofvs/' + i + '/value')
+      }
+
+      // copy all fields over to simplified object
+      for (var field_path of fields) {
+        copyField(ob, sob, field_path)
+      }
+
+      this.organize_ofvs(sob)
+
+      // deal with photo urls
+      if (sob.photos.hasOwnProperty(0)) { 
+        sob.photos[0].url = sob.photos[0].url.replace("square", "original")
+      }
+        
+      this.simpleObs.push(sob)
+
+    }
+  }
+
+  /**
+   * Reorganizes the ofvs section of a observation object (unordered array -> object) in place
+   */
+  organize_ofvs(ob) {
+
+    var new_ofvs = {}
+
+    for (var i in ob.ofvs) { 
+      var name = ob.ofvs[i].name
+      var value = ob.ofvs[i].value
+
+      new_ofvs[name] = value
+    }
+
+    ob.ofvs = new_ofvs
+
+  }
+
+  /**
+   * Flattens each object in array of objects so that they can be made into an table
+   */
+  flattenObservations(obs) {
+    Logger.log("Flattening observations...")
+
+    var flat_obs = []
+
+    for (var i in obs) {
+      flat_obs.push(flattenTree(obs[i]))
+    }
+
+    Logger.log("Observations flattened")
+    return flat_obs
+  }
+
+  /**
+   * Converts observations to array, returns result
+   */
+  makeArr(obs) {
+
+    obs = this.flattenObservations(obs)
+
+    Logger.log("Converting observations to array...")
+    var arr = []
+
+    // column headers
+    var headers = getKeys(obs)
+    arr.push(headers)
+
+    for (var i=0; i<obs.length; i++) {
+
+      var observation = obs[i]
+      var row = []
+
+      for (var j=0; j<headers.length; j++) {
+
+        var field = headers[j]
+        
+        if (field in observation) {
+          row.push(observation[field])
+        } else {
+          row.push(null)
+        }
+      }
+
+      arr.push(row)
+    }
+
+    Logger.log("Observations are converted to an array")
+    return arr
+  }
+
+  /**
+   * Clears the given sheet, then copies simpleObsArr into it.
+   * @param {String} data_type
+   */
+  toSheet(sheet, ob_type, row_count=null) {
+
+    var obs = this.simpleObs
+    
+    if (ob_type == 'r') {
+      obs = this.rawObs
+    }
+
+    var obs_arr = this.makeArr(obs)
+
+    if (!(row_count === null)) {
+      obs_arr = obs_arr.slice(0, row_count)
+    }
+
+    Logger.log("Copying to sheet...")
+    sheet.clear()
+      .getRange(1, 1, obs_arr.length, obs_arr[0].length)
+      .setValues(obs_arr)
+  }
+}
+
+
+/**
+ * Main function
+ * 
+ * For more information on using the Spreadsheet API, see
+ * https://developers.google.com/apps-script/service_spreadsheet
+ * 
+ */
+function iNatToSheet() {
+  const ss_url = 'https://docs.google.com/spreadsheets/d/1-LMnxaUw-8lgQ1dnCCUGIzeEVzx1g6BsaX8N1-Ja5C0/edit'
+  const sheet1 = SpreadsheetApp.openByUrl(ss_url).getSheets()[0]
+  const sheet2 = SpreadsheetApp.openByUrl(ss_url).getSheets()[1]
+
+  var obs = new Observations()
+
+  obs.parse()
+  //obs.flattenObservations()
+  Logger.log("Writing parsed observations")
+  obs.toSheet(sheet1, 's')
+  //Logger.log("Writing full observations")
+  //obs.toSheet(sheet2, 'r', 3)
+
+  //  private_place_guess, private_latitude, private_longitude, public_positional_accuracy, geoprivacy, taxon_geoprivacy, coordinates_obscured, positioning_method, positioning_device, place_town_name, place_county_name, place_state_name, place_country_name, place_admin1_name, place_admin2_name
+
+}
+
+
+/**
+ * Copies field from one object to another. Field may be a path instead of a simple key.
+ * @param {Object} source_ob  source object for copy
+ * @param {Object} target_ob  target object for copy
+ * @param {String} field_path property to be copied, or a property path separated by '/'
+ */
+function copyField(source_ob, target_ob, field_path) {
+
+  if (source_ob == null || target_ob == null) {
+    return -1
+  } else {
+    var field_path_arr = field_path.split('/')
+    var f0 = field_path_arr[0]
+
+    if (Object.keys(source_ob).includes(f0)) {
+
+      // if field_path is just one property..
+      if (field_path_arr.length === 1) {
+        target_ob[f0] = source_ob[f0] 
+
+      } // else field_path is an extended path.
+      else {
+        var truncated_path = field_path_arr.slice(1).join('/')
+
+        // if the field doesn't exist in the target object, add it
+        if (!Object.keys(target_ob).includes(f0)) {
+          target_ob[f0] = {}
+        }
+
+        // recurse
+        copyField(source_ob[f0], target_ob[f0], truncated_path)
+      } 
+  }  
+  // if key isn't in the source ob, do nothing
+
+  }
+
+}
+
+/**
+ * Wrapper function for flattenTree2
+ */ 
+function flattenTree(obj) {
+  return flattenTree2('', obj)
+}
+
+/**
+ * Flattens multi-dimensional object into one-dimensonal object. Information is retained in pathname-keys.
+ */
+function flattenTree2(path_prefix, obj) {
+
+  if (path_prefix !== '') {
+    path_prefix = path_prefix + '/'
+  }
+
+  var flatTree = {}
+
+  for (const field in obj) {
+    
+    // if it's an object..
+    if (typeof obj[field] === 'object' && obj[field] !== null) {
+
+      // recurse
+      var flat_branch = flattenTree2(field, obj[field])
+      var branch_to_merge = {}
+
+      for (const key in flat_branch) {
+        branch_to_merge[String(path_prefix) + key] = flat_branch[key]
+      }
+
+      flatTree = Object.assign(flatTree, branch_to_merge);
+
+    } else {
+      flatTree[String(path_prefix) + field] = obj[field]
+    }
+  }
+
+  return flatTree
+}
+
+/**
+ * Returns array consisting of all unique keys in an array of objects.
+ */
+function getKeys(arr) {
+  var all_keys = []
+  for (var i=0; i<arr.length; i++) {
+
+    var keys = Object.keys(flattenTree(arr[i]))
+
+    for (var j in keys) {
+      if (all_keys.includes(keys[j]) == false) {
+        all_keys.push(keys[j])
+      }
+    }
+  }
+  return all_keys
+}
+
